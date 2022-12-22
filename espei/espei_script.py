@@ -140,6 +140,7 @@ def run_espei(run_settings):
     """
     run_settings = get_run_settings(run_settings)
     system_settings = run_settings['system']
+    unary_settings = run_settings['system'].get('unary',None)
     output_settings = run_settings['output']
     generate_parameters_settings = run_settings.get('generate_parameters')
     mcmc_settings = run_settings.get('mcmc')
@@ -155,6 +156,12 @@ def run_espei(run_settings):
     _log.trace('Loading and checking datasets.')
     dataset_path = system_settings['datasets']
     datasets = load_datasets(sorted(recursive_glob(dataset_path, '*.json')))
+    if unary_settings:
+       unary_data = unary_settings['data']
+       unary_params = unary_settings['param_spec']
+    else:
+       unary_data = None
+       unary_params = None
     apply_tags(datasets, system_settings.get('tags', dict()))
     removed_ids = datasets.remove(where('disabled') == True)
     if len(removed_ids) > 0:
@@ -254,6 +261,7 @@ def run_espei(run_settings):
                       tracefile=tracefile, probfile=probfile,
                       mcmc_data_weights=data_weights,
                       approximate_equilibrium=approximate_equilibrium,
+                      unary_data=unary_data, unary_params = unary_params
                       )
 
         optimizer.dbf.to_file(output_settings['output_db'], if_exists='overwrite')
