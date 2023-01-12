@@ -1,19 +1,18 @@
 import logging
 import sys
 import time
+import warnings
+
 import numpy as np
 import emcee
 from espei.error_functions import calculate_zpf_error, calculate_activity_error, \
     calculate_non_equilibrium_thermochemical_probability, \
     calculate_equilibrium_thermochemical_probability, \
     SGTE91UnaryResidual, load_unary_datasets
-from espei.priors import PriorSpec, build_prior_specs
+from espei.priors import PriorSpec, build_prior_specs, rv_zero
 from espei.utils import unpack_piecewise, optimal_parameters
 from espei.error_functions.context import setup_context
 from .opt_base import OptimizerBase
-#from .graph import OptNode
-from espei.analysis import truncate_arrays
-from espei.datasets import load_datasets, recursive_glob
 
 _log = logging.getLogger(__name__)
 
@@ -49,7 +48,6 @@ class EmceeOptimizer(OptimizerBase):
         self.sampler = None
         self.tracefile = None
         self.probfile = None
-        self.propagate_unary = True
 
     @staticmethod
     def initialize_new_chains(params, chains_per_parameter, std_deviation, deterministic=True):
@@ -161,39 +159,13 @@ class EmceeOptimizer(OptimizerBase):
         Requires that the sampler attribute be set.
         """
         tr = self.tracefile
-        diffs = []
-        pconvs = []
         if tr is not None:
             _log.trace('Writing trace to %s', tr)
             np.save(tr, self.sampler.chain)
-        if self.probfile:
-            _log.trace('Writing lnprob to %s', self.probfile)
-            np.save(self.probfile,self.sampler.lnprobability)
-        #    local_trace = self.sampler.chain
-        #    local_prob = self.sampler.lnprobability
-        #    trunc_trace, trunc_prob = truncate_arrays(local_trace, local_prob)
-        #    for p in range(trunc_trace.shape[2]):
-        #       for i in [-1,-2,-3,-4,-5]:
-        #          diff = abs(np.percentile(trunc_trace[:,i,p],97.5) - np.percentile(trunc_trace[:,i,p],2.5))
-        #          diffs.append(diff)
-        #       if abs(diffs[-1] - diffs[-2])/diffs[-2] < 0.2:
-        #                pconvs.append(p)
-            
-        #    if len(pconvs) == trunc_trace.shape[2]:
-        #       break_mcmc=True
-        #    else:
-        #       _log.info('mcmc not converged by criteria after {0} iterations for {1} {2} {3} parameters'.format(trunc_trace.shape[1],trunc_trace.shape[2],len(pconvs),trunc_trace.shape[2]-len(pconvs)))
-        #       break_mcmc=False
-        #prob = self.probfile 
-        #if break_mcmc:
-        #   np.save(tr,trunc_trace)
-        #   np.save(prob,trunc_prob)
-        #   _log.info('mcmc converged by criteria after {} iterations'.format(trunc_trace.shape[1]))
-        #   return break_mcmc
-        #if prob is not None:
-        #    _log.trace('Writing lnprob to %s', prob)
-        #    np.save(prob, self.sampler.lnprobability)
-        #return None
+        prob = self.probfile
+        if prob is not None:
+            _log.trace('Writing lnprob to %s', prob)
+            np.save(prob, self.sampler.lnprobability)
 
     def do_sampling(self, chains, iterations):
         progbar_width = 30
@@ -204,16 +176,11 @@ class EmceeOptimizer(OptimizerBase):
                 if (i + 1) % self.save_interval == 0:
                     self.save_sampler_state()
                     _log.trace('Acceptance ratios for parameters: %s', self.sampler.acceptance_fraction)
-                    #if ret:
-                    #   break
-                n = int((progbar_width + 1) * float(i) / iterations)
+                n = int((progbar_width) * float(i + 1) / iterations)
                 _log.info("\r[%s%s] (%d of %d)\n", '#' * n, ' ' * (progbar_width - n), i + 1, iterations)
-            n = int((progbar_width + 1) * float(i + 1) / iterations)
-            _log.info("\r[%s%s] (%d of %d)\n", '#' * n, ' ' * (progbar_width - n), i + 1, iterations)
         except KeyboardInterrupt:
             pass
         _log.info('MCMC complete.')
-        #_log.info('FINAL_ACCEPT SUM, FRACTION for parameters: %s', np.sum(self.sampler.acceptance_fraction),np.sum(self.sampler.acceptance_fraction)/len(self.sampler.acceptance_fraction))
         self.save_sampler_state()
 
     def _fit(self, symbols, ds, prior=None, iterations=1000,
@@ -221,6 +188,7 @@ class EmceeOptimizer(OptimizerBase):
              restart_trace=None, tracefile=None, probfile=None,
              mcmc_data_weights=None, approximate_equilibrium=False,unary_data=None,
              unary_params=None):
+             ):
         """
 
         Parameters
@@ -256,22 +224,21 @@ class EmceeOptimizer(OptimizerBase):
 
         Returns
         -------
-        OptNode
+        Dict[str, float]
 
         """
         # Set NumPy print options so logged arrays print on one line. Reset at the end.
         np.set_printoptions(linewidth=sys.maxsize)
         cbs = self.scheduler is None
         ctx = setup_context(self.dbf, ds, symbols, data_weights=mcmc_data_weights, phase_models=self.phase_models, make_callables=cbs, unary_path=unary_data, unary_params = unary_params)
-        #ctx = setup_context(self.dbf, ds, symbols, data_weights=mcmc_data_weights, phase_models=self.phase_models, make_callables=cbs)
         symbols_to_fit = ctx['symbols_to_fit']
         initial_guess = np.array([unpack_piecewise(self.dbf.symbols[s]) for s in symbols_to_fit])
-        _log.debug("Initial guess is ... ", initial_guess)
-        _log.debug("Getting initial priors...")
+
+        if approximate_equilibrium:
+            warnings.warn(f"Approximate equilibrium is deprecated and will be removed in ESPEI 0.10. Got {approximate_equilibrium}.", DeprecationWarning)
+
         prior_dict = self.get_priors(prior, symbols_to_fit, initial_guess)
         ctx.update(prior_dict)
-        ctx['zpf_kwargs']['approximate_equilibrium'] = approximate_equilibrium
-        ctx['equilibrium_thermochemical_kwargs']['approximate_equilibrium'] = approximate_equilibrium
         # Run the initial parameters for guessing purposes:
         _log.trace("Probability for initial parameters")
         self.predict(initial_guess, **ctx)
@@ -298,123 +265,43 @@ class EmceeOptimizer(OptimizerBase):
         _log.trace('Change in parameters: %s', np.abs(initial_guess - optimal_params) / initial_guess)
         parameters = dict(zip(symbols_to_fit, optimal_params))
         np.set_printoptions(linewidth=75)
-        #return OptNode(parameters, ds)
         return parameters
 
     @staticmethod
-    def predict(params,**ctx):
+    def predict(params, **ctx):
         """
         Calculate lnprob = lnlike + lnprior
         """
-        _log.trace('Parameters - %s', params)
+        _log.debug('Parameters - %s', params)
 
         # Important to coerce to floats here because the values _must_ be floats if
         # they are used to update PhaseRecords directly
         params = np.asarray(params, dtype=np.float_)
 
         # lnprior
-        prior_rvs = ctx['prior_rvs']
+        prior_rvs = ctx.get('prior_rvs', [rv_zero() for _ in range(params.size)])
         lnprior_multivariate = [rv.logpdf(theta) for rv, theta in zip(prior_rvs, params)]
+        _log.debug('Priors: %s', lnprior_multivariate)
         lnprior = np.sum(lnprior_multivariate)
         if np.isneginf(lnprior):
             # It doesn't matter what the likelihood is. We can skip calculating it to save time.
             _log.trace('Proposal - lnprior: %0.4f, lnlike: %0.4f, lnprob: %0.4f', lnprior, np.nan, lnprior)
             return lnprior
-        parameters = {param_name: param for param_name, param in zip(ctx['symbols_to_fit'], params.tolist())}
-        unary_kwargs = ctx.get('unary_kwargs')
-        zpf_kwargs = ctx.get('zpf_kwargs')
-        activity_kwargs = ctx.get('activity_kwargs')
-        non_equilibrium_thermochemical_kwargs = ctx.get('thermochemical_kwargs')
-        equilibrium_thermochemical_kwargs = ctx.get('equilibrium_thermochemical_kwargs')
+
+        # lnlike
         starttime = time.time()
+        lnlike = 0.0
+        likelihoods = {}
+        for residual_obj in ctx.get("residual_objs", []):
+            likelihood = residual_obj.get_likelihood(params)
+            likelihoods[type(residual_obj).__name__] = likelihood
+            lnlike += likelihood
+        liketime = time.time() - starttime
 
-        ### adding the unary error
-        #print ("UNARY KWARGS?", unary_kwargs)
-        #sys.exit()
-        if unary_kwargs is not None:
-           unary_A_range = unary_kwargs['param_spec'].get('Param_A_range',None)
-           if unary_A_range:
-              unary_A_params = params[unary_A_range[0]:unary_A_range[1]+1]
-           unary_A_Tm_range = unary_kwargs['param_spec'].get('Tm_A_range',None)
-           unary_B_range = unary_kwargs['param_spec'].get('Param_B_range',None)
-           if unary_B_range:
-              unary_B_params = params[unary_B_range[0]:unary_B_range[1]+1]
-           unary_B_Tm_range = unary_kwargs['param_spec'].get('Tm_B_range',None)
-           datasets_A = [f for f in unary_kwargs['unary_data'] if 'UnaryA_' in f]
-           datasets_B = [f for f in unary_kwargs['unary_data'] if 'UnaryB_' in f]
-           if datasets_A:
-              _log.trace('Number of unary A datasets %f',len(datasets_A))
-              #unary_A = SGTE91UnaryDataLikelihood(unary_A_params,datasets_A,\
-              #          Tm_range=unary_A_Tm_range,Tb=1357.77)
-              unary_db = load_unary_datasets(datasets_A)
-              unary_A = SGTE91UnaryResidual(unary_db)
-              if unary_A.check_constraints():
-                 #unary_A.get_all_unary_data()
-                 #unary_A.get_property_differences()
-                 #unary_prob_A = unary_A.get_lnprob()
-                 unary_prob_A = unary_A.get_likelihood(unary_A_params)
-                 if np.isnan(unary_prob_A):
-                    unary_prob_A = -np.inf
-                    _log.trace('Got a unary A satisfying constraints but Tm out of bounds')
-              else:
-                 _log.trace('Got a unary A not satisfying constraints')
-                 unary_prob_A = -np.inf
-           else:
-              unary_prob_A = 0
-           
-           if datasets_B:    
-              _log.trace('Number of unary B datasets %f',len(datasets_B))
-              unary_B = SGTE91UnaryDataLikelihood(unary_B_params,datasets_B,unary_B_Tm_range)
-              if unary_B.check_constraints():
-                 unary_B.get_all_unary_data()
-                 unary_B.get_property_differences()
-                 unary_prob_B = unary_B.get_lnprob()
-                 if np.isnan(unary_prob_B):
-                    unary_prob_B = -np.inf
-                    _log.trace('Got a unary B satisfying constraints but Tm out of bounds')
-              else:
-                 _log.trace('Got a unary B not satisfying constraints')
-                 unary_prob_B = -np.inf
-           else:
-              unary_prob_B = 0
-           if len(datasets_A)==0 and len(datasets_B)==0:
-              _log.trace('WARNING: No datasets for any unary component')
-           unary_prob = unary_prob_A + unary_prob_B
-
-        else:
-           unary_prob = 0.0
-        if zpf_kwargs is not None:
-            try:
-                multi_phase_error = calculate_zpf_error(parameters=params, **zpf_kwargs)
-            except (ValueError, np.linalg.LinAlgError) as e:
-                raise e
-                print(e)
-                multi_phase_error = -np.inf
-        else:
-            multi_phase_error = 0
-        if equilibrium_thermochemical_kwargs is not None:
-            eq_thermochemical_prob = calculate_equilibrium_thermochemical_probability(parameters=params, **equilibrium_thermochemical_kwargs)
-        else:
-            eq_thermochemical_prob = 0
-        if activity_kwargs is not None:
-            actvity_error = calculate_activity_error(parameters=parameters, **activity_kwargs)
-        else:
-            actvity_error = 0
-        if non_equilibrium_thermochemical_kwargs is not None:
-            non_eq_thermochemical_prob = calculate_non_equilibrium_thermochemical_probability(parameters=params, **non_equilibrium_thermochemical_kwargs)
-        else:
-            non_eq_thermochemical_prob = 0
-
-        total_error = multi_phase_error + eq_thermochemical_prob + non_eq_thermochemical_prob + actvity_error + unary_prob
-        _log.trace('Likelihood - %0.2fs - Non-equilibrium thermochemical: %0.3f. Equilibrium thermochemical: %0.3f. ZPF: %0.3f. Activity: %0.3f. Unary: %0.3f. Total: %0.3f.', time.time() - starttime, non_eq_thermochemical_prob, eq_thermochemical_prob, multi_phase_error, actvity_error, unary_prob, total_error)
-        lnlike = np.array(total_error, dtype=np.float64)
+        like_str = ". ".join([f"{ky}: {vl:0.3f}" for ky, vl in likelihoods.items()])
+        lnlike = np.array(lnlike, dtype=np.float64)
+        _log.trace('Likelihood - %0.2fs - %s. Total: %0.3f.', liketime, like_str, lnlike)
 
         lnprob = lnprior + lnlike
         _log.trace('Proposal - lnprior: %0.4f, lnlike: %0.4f, lnprob: %0.4f', lnprior, lnlike, lnprob)
         return lnprob
-
-    def return_string_params(self,p):
-        if p<10:
-           return '0'+str(p)
-        else:
-           return str(p)
