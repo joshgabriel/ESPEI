@@ -1,0 +1,10 @@
+system:
+  phase_models: Cu-Mg_phases.json
+  datasets: param_gen_data
+generate_parameters:
+  excess_model: linear
+  ref_state: SGTE91
+output:
+  output_db: Cu-Mg_gen.tdb
+  logfile: espei_sgte_MgCu.log
+  verbosity: 3
